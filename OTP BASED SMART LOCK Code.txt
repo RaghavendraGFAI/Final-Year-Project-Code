@@ -1,0 +1,221 @@
+#include <SoftwareSerial.h>
+#include <Servo.h>
+Servo myservo;
+const byte BT_RX = 2; //Connect bluetooth transmitter pin
+const byte BT_TX = 3; //Connect bluetooth receiver pin
+const byte GSM_RX = 6;
+const byte GSM_TX = 7;
+int stopPositionServo = 80;
+int unsuccessfullAttempts = 0;
+SoftwareSerial BTSerial(BT_RX, BT_TX);
+char state = 'a';
+
+int open_led = 9;
+int close_led = 10;
+int buzzer = 8;
+int relay = 4;
+
+void setup() {
+  Serial.begin(9600);
+  BTSerial.begin(9600);
+  pinMode(0,INPUT);
+  pinMode(1,OUTPUT);
+  pinMode(BT_RX, INPUT);
+  pinMode(BT_TX, OUTPUT);
+  pinMode(GSM_RX, INPUT);
+  pinMode(GSM_TX, OUTPUT);
+  pinMode(open_led, OUTPUT);
+  pinMode(close_led, OUTPUT);
+  pinMode(buzzer, OUTPUT);
+  pinMode(relay,OUTPUT);
+  myservo.attach(5);
+  myservo.write(stopPositionServo);
+  delay(1000);
+}
+
+const char START_TOKEN = '?';
+const char END_TOKEN = ';';
+const char DELIMIT_TOKEN = '&';
+const int CHAR_TIMEOUT = 20;
+
+String otp = "ssss";
+bool waitingForStartToken = true;
+String messageBuffer = "";
+long lastRun = millis();
+
+void beep(int dly) {
+  digitalWrite(buzzer, HIGH);
+  delay(dly);
+  digitalWrite(buzzer, LOW);
+}
+void stateInform() {
+  if ((millis() - lastRun) > 500) {
+    lastRun = millis();
+    BTSerial.print(state);
+  }
+}
+
+String getKeey(String text, int textCursor) {
+  String key = "";
+  while ((text[textCursor] >= 'a') && (text[textCursor] <= 'z') && (textCursor < text.length())) {
+    key += text[textCursor];
+    textCursor ++;
+  }
+  return key;
+}
+String getValue(String text, int textCursor) {
+  String value = "";
+  while ((text[textCursor] >= '0') && (text[textCursor] <= '9') && (textCursor < text.length())) {
+    value += text[textCursor];
+    textCursor ++;
+  }
+  return value;
+}
+void extractKeyValue(String message) {
+  beep(150);
+  int keyCursor = 0;
+  int valueCursor = 0;
+  bool rgbOk = true;
+  String key, value;
+  // message should be in the format xxxxxxx=xxxx  kotp=1111
+
+  if (message.startsWith("k")) {
+    keyCursor = 1;
+    key = getKeey(message, keyCursor);
+    value = message.substring(key.length() + 1 + 1); //one for equals and another for 'K'
+    switch (key[0]) {
+      case 's': //sendotp
+        generateOTP();
+        break;
+      case 't': //tresendotp  -> resend otp
+        SendSMS();
+        break;
+      case 'v'://"verifyotp":
+        verifyOtp(value);
+        break;
+      case 'o': //"open":
+        openLock();
+        break;
+      case 'c': // "close":
+        closeLock();
+        break;
+      case 'r':// "reset":
+        state = 'a';
+        break;
+    }
+  }
+  else {
+    //do nothing, ultimately the string length exceends the limit and bluetooth paysum check reloads
+  }
+
+}
+void openLock() {
+  digitalWrite(open_led, 1);
+  digitalWrite(close_led, 0);
+  digitalWrite(relay,1);
+  //clock wise
+  myservo.write(70);
+  delay(1000);
+  myservo.write(stopPositionServo);
+  state = 'x';
+}
+void closeLock() {
+  digitalWrite(open_led, 0);
+  digitalWrite(close_led, 1);
+  digitalWrite(relay,0);
+  //anticlock wise
+  myservo.write(100);
+  delay(1000);
+  myservo.write(stopPositionServo);
+  state = 'y';
+}
+void verifyOtp(String OtP) {
+  if (OtP[0] == otp[0] && OtP[1] == otp[1] && OtP[2] == otp[2] && OtP[3] == otp[3]) {
+    state = 'd';
+    unsuccessfullAttempts = 0;
+  } else {
+    if (unsuccessfullAttempts < 4) {
+      unsuccessfullAttempts ++;
+      state = 'e';
+    } else {
+      tresPsr();
+    }
+
+  }
+}
+
+void SendSMS()
+{
+  Serial.println("AT+CMGF=1");    //Sets the GSM Module in Text Mode
+  delay(1000);  // Delay of 1000 milli seconds or 1 second
+  Serial.println("AT+CMGS=\"+917829575361\"\r"); // Replace x with mobile number
+  delay(1000);
+  Serial.print("The OTP to unlock the door is ");// The SMS text you want to send
+  Serial.println(otp);// The SMS text you want to send
+  delay(100);
+  Serial.println((char)26);// ASCII code of CTRL+Z
+  delay(1000);
+  state = 'b';
+}
+void tresPsr()
+{
+  Serial.println("AT+CMGF=1");    //Sets the GSM Module in Text Mode
+  delay(1000);  // Delay of 1000 milli seconds or 1 second
+  Serial.println("AT+CMGS=\"+917829575361\"\r"); // Replace x with mobile number
+  delay(1000);
+  Serial.print(unsuccessfullAttempts);
+  Serial.println(" Unsuccessfull attempts to open the lock. Ignore if this is you.");
+  delay(100);
+  Serial.println((char)26);// ASCII code of CTRL+Z
+  delay(1000);
+  state = 'a';
+}
+void generateOTP() {
+  delay(100);
+  randomSeed(analogRead(0));
+  int genOtp = random(1000, 9999);
+  otp = String(genOtp);
+  delay(100);
+  SendSMS();
+}
+void readAppMessage() {
+  char nextData;
+  if (BTSerial.available()) {
+    // check for start of message
+    if (waitingForStartToken) {
+      do {
+        nextData = BTSerial.read();
+      } while ((nextData != START_TOKEN) && BTSerial.available());
+      if (nextData == START_TOKEN) {
+        waitingForStartToken = false;
+      }
+    }
+    // read command
+    if (!waitingForStartToken && BTSerial.available()) {
+      do {
+        nextData = BTSerial.read();
+        messageBuffer += nextData;
+      } while ((nextData != END_TOKEN) && BTSerial.available());
+
+      // check if message complete
+      if (nextData == END_TOKEN) {
+        // remove last character
+        messageBuffer = messageBuffer.substring(0, messageBuffer.length() - 1);
+        extractKeyValue(messageBuffer);
+        messageBuffer = "";
+        waitingForStartToken = true;
+      }
+
+      // check for char timeout
+      if (messageBuffer.length() > CHAR_TIMEOUT) {
+        messageBuffer = "";
+        waitingForStartToken = true;
+      }
+    }
+  }
+}
+void loop() {
+  stateInform(); //inform the arduino state to the app
+  readAppMessage();
+
+}
